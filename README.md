@@ -56,3 +56,12 @@ In summary, the script has evolved to generate very complete and organized docum
 
 With this structure, you can limit the context you give to the agent, so, you can get faster and better responses
 
+
+## How to use it
+
+Download Tabular Editor https://www.sqlbi.com/tools/tabular-editor/
+Open your tabular model, and paste the code from the file "Tabular Model Context" in the c# script editor,
+ change the directory in this line 
+"string outputBasePath = @"C:\Result"; // Default, puede causar problemas de permisos. Asegúrate de que esta ruta es válida y tienes permisos."
+And Run it!
+
