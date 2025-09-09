@@ -1,0 +1,353 @@
+// === Configuration ===
+// Output control flags
+bool includeFormatStrings = true; // Habilitado para más detalle en YAML
+bool includeDescriptions = true;  // Habilitado para más detalle en YAML
+bool includeDisplayFolders = true;// Habilitado para más detalle en YAML
+bool includeDataType = true;    // Habilitado para más detalle en YAML
+// Filtering flags
+bool onlyIncludeMeasuresWithExpressions = false;
+bool skipEmptyRelatedTables = true;
+
+// === Output Path ===
+// Define el directorio base donde se guardarán los archivos.
+// CAMBIA ESTA RUTA SI OBTIENES UN ERROR DE ACCESO DENEGADO.
+// Ejemplos:
+// string outputBasePath = @"C:\Users\TuUsuario\Desktop\PowerBI_Model_Export_Files";
+// string outputBasePath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "PowerBI_Model_Export_Files");
+string outputBasePath = @"C:\Result"; // Default, puede causar problemas de permisos. Asegúrate de que esta ruta es válida y tienes permisos.
+
+// Helper function to sanitize names for paths/files
+Func<string, string> SanitizeName = (name) => {
+    if (string.IsNullOrWhiteSpace(name)) return "_empty_name_";
+    
+    // Primero, reemplazar espacios con guiones bajos
+    string nameWithUnderscores = name.Replace(' ', '_');
+
+    // Luego, eliminar otros caracteres inválidos para nombres de archivo
+    string regexSearch = new string(System.IO.Path.GetInvalidFileNameChars());
+    System.Text.RegularExpressions.Regex r = new System.Text.RegularExpressions.Regex(string.Format("[{0}]", System.Text.RegularExpressions.Regex.Escape(regexSearch)));
+    return r.Replace(nameWithUnderscores, ""); // Reemplazar caracteres inválidos con nada, o con "_" si se prefiere.
+};
+
+// Helper function for YAML-like string formatting
+Func<string, string> YamlString = (value) => {
+    if (value == null) return "\"\""; // Represent null as empty string in YAML for consistency
+    // Basic escaping for YAML: replace " with "" and wrap in quotes if it contains special chars or is empty
+    string escapedValue = value.Replace("\"", "\"\"");
+    if (string.IsNullOrWhiteSpace(escapedValue) || 
+        escapedValue.Contains(':') || 
+        escapedValue.Contains('-') || 
+        escapedValue.Contains('[') || 
+        escapedValue.Contains(']') || 
+        escapedValue.Contains('{') || 
+        escapedValue.Contains('}') ||
+        escapedValue.Contains('#') ||
+        escapedValue.Contains(Environment.NewLine) // Handle multi-line strings by quoting
+       ) {
+        if (escapedValue.Contains(Environment.NewLine)) {
+             return "\"" + escapedValue.Replace(Environment.NewLine, "\\n") + "\""; // YAML spec for newline in double-quoted string.garione
+        }
+        return "\"" + escapedValue + "\"";
+    }
+    return escapedValue; // No quotes needed for simple strings
+};
+
+// Helper for multi-line YAML strings (like expressions)
+Func<string, string, string> YamlMultilineString = (prefix, value) => {
+    if (string.IsNullOrWhiteSpace(value)) return prefix + " \"\""; // Empty expression
+    var sb = new System.Text.StringBuilder();
+    sb.Append(prefix).AppendLine(" |");
+    // Split by any common newline sequence
+    foreach (var line in value.Trim().Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None)) {
+        sb.Append(prefix).Append("  ").AppendLine(line.TrimEnd());
+    }
+    return sb.ToString().TrimEnd(Environment.NewLine.ToCharArray());
+};
+
+
+try
+{
+    // Ensure base output directory exists
+    System.IO.Directory.CreateDirectory(outputBasePath);
+}
+catch (UnauthorizedAccessException ex)
+{
+    Error(string.Format("Error de acceso: No se pudo crear el directorio en '{0}'.\nPor favor, modifica la variable 'outputBasePath' en el script a una ruta donde tengas permisos de escritura (ej. tu Escritorio o Documentos) y vuelve a intentarlo.\nDetalles: {1}", System.IO.Path.GetFullPath(outputBasePath), ex.Message));
+    return; // Detiene la ejecución del script si no se puede crear el directorio.
+}
+catch (Exception ex)
+{
+    Error(string.Format("Error al crear el directorio de salida '{0}': {1}", System.IO.Path.GetFullPath(outputBasePath), ex.Message));
+    return; // Detiene la ejecución por otros errores de creación de directorio.
+}
+
+
+// === File Writers ===
+Action<string, string> WriteToFile = (filePath, content) => {
+    System.IO.File.WriteAllText(filePath, content);
+};
+
+// === Main Logic ===
+
+// 1. Model Summary and Configuration File
+var summarySb = new System.Text.StringBuilder();
+summarySb.AppendLine("# ===============================================");
+summarySb.AppendLine("# YAML Export of Power BI Model (Tabular Editor) - File Output Version");
+summarySb.AppendLine("# Format: Structured Text Files (YAML-like) for machine reading and human review");
+summarySb.AppendLine("# Target: LLMs and metadata-driven tools");
+summarySb.AppendLine("# ===============================================");
+summarySb.AppendLine("model_summary:");
+summarySb.AppendLine("  tables_count: " + Model.Tables.Count());
+summarySb.AppendLine("  measures_count: " + Model.AllMeasures.Count());
+summarySb.AppendLine("  relationships_count: " + Model.Relationships.Count());
+summarySb.AppendLine();
+summarySb.AppendLine("configuration_flags:");
+summarySb.AppendLine("  include_format_strings: " + includeFormatStrings.ToString().ToLower());
+summarySb.AppendLine("  include_descriptions: " + includeDescriptions.ToString().ToLower());
+summarySb.AppendLine("  include_display_folders: " + includeDisplayFolders.ToString().ToLower());
+summarySb.AppendLine("  include_data_type: " + includeDataType.ToString().ToLower());
+summarySb.AppendLine("  only_include_measures_with_expressions: " + onlyIncludeMeasuresWithExpressions.ToString().ToLower());
+summarySb.AppendLine("  skip_empty_related_tables: " + skipEmptyRelatedTables.ToString().ToLower());
+
+WriteToFile(System.IO.Path.Combine(outputBasePath, "model_summary_and_config.txt"), summarySb.ToString());
+
+// 2. Connections (Relationships)
+string relationshipsFilePath = System.IO.Path.Combine(outputBasePath, "relationships.txt");
+
+var relSb = new System.Text.StringBuilder();
+relSb.AppendLine("relationships:");
+foreach (var rel in Model.Relationships.OrderBy(r => r.FromTable.Name).ThenBy(r => r.ToTable.Name)) {
+    relSb.AppendLine("  - from_table: " + YamlString(rel.FromTable.Name));
+    relSb.AppendLine("    from_column: " + YamlString(rel.FromColumn.Name));
+    relSb.AppendLine("    to_table: " + YamlString(rel.ToTable.Name));
+    relSb.AppendLine("    to_column: " + YamlString(rel.ToColumn.Name));
+    relSb.AppendLine("    is_active: " + rel.IsActive.ToString().ToLower());
+    relSb.AppendLine("    cross_filter_direction: " + YamlString(rel.CrossFilteringBehavior.ToString()));
+    relSb.AppendLine("    cardinality: " + YamlString(rel.FromCardinality + "-to-" + rel.ToCardinality));
+}
+if (!Model.Relationships.Any()) {
+    relSb.AppendLine("  [] # No relationships found");
+}
+WriteToFile(relationshipsFilePath, relSb.ToString());
+
+
+// Reverse relationship map (used for table details)
+var relatedTableMap = new Dictionary<string, HashSet<string>>();
+foreach (var t in Model.Tables) relatedTableMap[t.Name] = new HashSet<string>();
+foreach (var rel in Model.Relationships) {
+    relatedTableMap[rel.FromTable.Name].Add(rel.ToTable.Name);
+    relatedTableMap[rel.ToTable.Name].Add(rel.FromTable.Name);
+}
+
+// Prepare measure index for lineage lookup
+var measureGlobalIndex = new Dictionary<string, Measure>();
+foreach (var m in Model.AllMeasures)
+    if (!measureGlobalIndex.ContainsKey(m.Name)) measureGlobalIndex[m.Name] = m;
+
+// 3. Tables (each table gets its own YAML-like file)
+foreach (var table in Model.Tables.OrderBy(t => t.Name)) {
+    string sanitizedTableName = SanitizeName(table.Name);
+    string tableFilePath = System.IO.Path.Combine(outputBasePath, sanitizedTableName + ".txt"); 
+    
+    var tableSb = new System.Text.StringBuilder();
+    tableSb.AppendLine("table:");
+    tableSb.AppendLine("  name: " + YamlString(table.Name));
+
+    if (includeDescriptions)
+        tableSb.AppendLine("  description: " + YamlString(table.Description));
+    
+    string rowCount = "Error";
+    try { rowCount = EvaluateDax("COUNTROWS('" + table.Name.Replace("'", "''") + "')").ToString(); } catch {} 
+    tableSb.AppendLine("  row_count_estimated: " + YamlString(rowCount));
+
+    // 3a. M-Code / DAX Definition for the table
+    string sourceExpressionText = "Source expression not found or table type cannot be determined.";
+    var calcTable = table as CalculatedTable; 
+
+    if (calcTable != null && !string.IsNullOrWhiteSpace(calcTable.Expression)) {
+        sourceExpressionText = calcTable.Expression;
+        tableSb.AppendLine(YamlMultilineString("  dax_definition:", sourceExpressionText));
+    }
+    else if (table.Partitions.Any()) {
+        var firstPartition = table.Partitions.First();
+        if (firstPartition.SourceType == PartitionSourceType.M) {
+            sourceExpressionText = firstPartition.Query ?? "M Partition: Query is null.";
+            sourceExpressionText = sourceExpressionText.Replace("#(lf)", Environment.NewLine);
+            tableSb.AppendLine(YamlMultilineString("  m_code:", sourceExpressionText));
+        }
+        else if (firstPartition.SourceType == PartitionSourceType.Calculated) {
+            sourceExpressionText = firstPartition.Query ?? "Calculated Partition: Query is null.";
+            tableSb.AppendLine(YamlMultilineString("  dax_partition_definition:", sourceExpressionText));
+        }
+        else {
+            sourceExpressionText = string.Format(
+                "Table's first partition is of type '{0}'. Partition Name: {1}. Query: {2}",
+                firstPartition.SourceType, firstPartition.Name, firstPartition.Query ?? "N/A"
+            );
+            tableSb.AppendLine("  source_info: " + YamlString(sourceExpressionText));
+        }
+    } else {
+         tableSb.AppendLine("  source_info: " + YamlString(sourceExpressionText));
+    }
+
+    // Related Tables
+    var related = relatedTableMap[table.Name];
+    if (!skipEmptyRelatedTables || related.Count > 0) {
+        tableSb.AppendLine("  related_tables:");
+        if (related.Count > 0) {
+            foreach (var relName in related.OrderBy(n => n))
+                tableSb.AppendLine("    - " + YamlString(relName));
+        } else {
+            tableSb.AppendLine("    []");
+        }
+    }
+    
+    // Columns (including calculated columns)
+    tableSb.AppendLine("  columns:");
+    if (table.Columns.Any()) {
+        foreach (var column in table.Columns.OrderBy(c => c.Name)) {
+            tableSb.AppendLine("    - name: " + YamlString(column.Name));
+            
+            var calculatedColumn = column as CalculatedColumn;
+            bool isCalculated = calculatedColumn != null && !string.IsNullOrWhiteSpace(calculatedColumn.Expression);
+
+            if (isCalculated) {
+                tableSb.AppendLine("      is_calculated: true");
+            }
+
+            if (includeDescriptions)
+                tableSb.AppendLine("      description: " + YamlString(column.Description));
+            if (includeDataType)
+                tableSb.AppendLine("      data_type: " + YamlString(column.DataType.ToString()));
+            if (includeFormatStrings && !string.IsNullOrWhiteSpace(column.FormatString))
+                tableSb.AppendLine("      format_string: " + YamlString(column.FormatString));
+            if (column.IsHidden)
+                 tableSb.AppendLine("      is_hidden: true");
+            
+            if (isCalculated) {
+                tableSb.AppendLine(YamlMultilineString("      expression:", calculatedColumn.Expression));
+            }
+        }
+    } else {
+        tableSb.AppendLine("    [] # No columns in this table");
+    }
+
+    // Measures associated with this table
+    tableSb.AppendLine("  measures:");
+    var tableMeasures = Model.AllMeasures.Where(m => m.Table.Name == table.Name).OrderBy(m => m.Name).ToList();
+    if (tableMeasures.Any()) {
+        foreach (var measure in tableMeasures) {
+            if (onlyIncludeMeasuresWithExpressions && string.IsNullOrWhiteSpace(measure.Expression))
+                continue;
+
+            tableSb.AppendLine("    - name: " + YamlString(measure.Name));
+            if (includeDescriptions)
+                tableSb.AppendLine("      description: " + YamlString(measure.Description));
+            if (includeDisplayFolders)
+                tableSb.AppendLine("      display_folder: " + YamlString(measure.DisplayFolder));
+            if (includeFormatStrings && !string.IsNullOrWhiteSpace(measure.FormatString))
+                tableSb.AppendLine("      format_string: " + YamlString(measure.FormatString));
+            
+            tableSb.AppendLine(YamlMultilineString("      expression:", measure.Expression));
+
+            // Dependency analysis
+            var dax = measure.Expression ?? "";
+            var colDeps = new HashSet<string>();
+            var directMeasureDeps = new HashSet<string>();
+            var colPattern = new System.Text.RegularExpressions.Regex(@"'([^']+?)'\[([^\]]+?)\]"); 
+            var measurePattern = new System.Text.RegularExpressions.Regex(@"(?<!['\w])\[(.+?)\](?![\(\['])"); 
+
+            foreach (System.Text.RegularExpressions.Match mRegex in colPattern.Matches(dax))
+                colDeps.Add(mRegex.Groups[1].Value + "[" + mRegex.Groups[2].Value + "]");
+
+            foreach (System.Text.RegularExpressions.Match mRegex in measurePattern.Matches(dax)) {
+                string potentialMeasure = mRegex.Groups[1].Value;
+                if(measureGlobalIndex.ContainsKey(potentialMeasure)) {
+                    directMeasureDeps.Add(potentialMeasure);
+                }
+            }
+            
+            tableSb.AppendLine("      dependencies:");
+            tableSb.AppendLine("        columns:");
+            if (colDeps.Any()) {
+                foreach(var dep in colDeps.OrderBy(c => c)) tableSb.AppendLine("          - " + YamlString(dep));
+            } else {
+                tableSb.AppendLine("          []");
+            }
+            
+            tableSb.AppendLine("        measures:");
+            if (directMeasureDeps.Any()) {
+                foreach(var dep in directMeasureDeps.OrderBy(c => c)) tableSb.AppendLine("          - " + YamlString(dep));
+            } else {
+                tableSb.AppendLine("          []");
+            }
+
+            // Lineage
+            var visited = new HashSet<string>();
+            var stack = new Stack<string>();
+            if (measureGlobalIndex.ContainsKey(measure.Name)) { 
+                 stack.Push(measure.Name);
+            }
+
+            while (stack.Count > 0) {
+                var current = stack.Pop();
+                if (measureGlobalIndex.ContainsKey(current) && visited.Add(current)) {
+                    var currentMeasureExpression = measureGlobalIndex[current].Expression ?? "";
+                    foreach (System.Text.RegularExpressions.Match mRegex in measurePattern.Matches(currentMeasureExpression)) {
+                         string potentialDependency = mRegex.Groups[1].Value;
+                         if (measureGlobalIndex.ContainsKey(potentialDependency) && !visited.Contains(potentialDependency)) {
+                            stack.Push(potentialDependency);
+                         }
+                    }
+                }
+            }
+            
+            var lineage = visited.Where(m => m != measure.Name && !directMeasureDeps.Contains(m)).OrderBy(m => m).ToList();
+            tableSb.AppendLine("        lineage_indirect_measures:");
+            if (lineage.Any()) {
+                foreach(var dep in lineage) tableSb.AppendLine("          - " + YamlString(dep));
+            } else {
+                tableSb.AppendLine("          []");
+            }
+        }
+    } else {
+        tableSb.AppendLine("    [] # No measures in this table");
+    }
+    WriteToFile(tableFilePath, tableSb.ToString());
+}
+
+
+// 4. Calculation Groups
+var calcGroupTables = Model.Tables.OfType<CalculationGroupTable>().ToList();
+if (calcGroupTables.Any()) {
+    string cgDir = System.IO.Path.Combine(outputBasePath, "CalculationGroups");
+    System.IO.Directory.CreateDirectory(cgDir);
+
+    foreach (var cgTable in calcGroupTables.OrderBy(t => t.Name)) {
+        string sanitizedCgName = SanitizeName(cgTable.Name);
+        string cgFilePath = System.IO.Path.Combine(cgDir, sanitizedCgName + ".txt");
+        var cgSb = new System.Text.StringBuilder();
+
+        cgSb.AppendLine("calculation_group:");
+        cgSb.AppendLine("  name: " + YamlString(cgTable.Name));
+        cgSb.AppendLine("  precedence: " + cgTable.CalculationGroup.Precedence);
+        cgSb.AppendLine("  items:");
+        if (cgTable.CalculationItems.Any()) {
+            foreach (var item in cgTable.CalculationItems.OrderBy(i => i.Ordinal)) { 
+                cgSb.AppendLine("    - name: " + YamlString(item.Name));
+                cgSb.AppendLine("      ordinal: " + item.Ordinal);
+                cgSb.AppendLine(YamlMultilineString("      expression:", item.Expression));
+                if (!string.IsNullOrWhiteSpace(item.FormatStringExpression)) {
+                    cgSb.AppendLine(YamlMultilineString("      format_string_expression:", item.FormatStringExpression));
+                } else {
+                    cgSb.AppendLine("      format_string_expression: \"\"");
+                }
+            }
+        } else {
+             cgSb.AppendLine("    [] # No items in this calculation group");
+        }
+        WriteToFile(cgFilePath, cgSb.ToString());
+    }
+}
+
+Info("Export completed. Files saved to: " + System.IO.Path.GetFullPath(outputBasePath));
